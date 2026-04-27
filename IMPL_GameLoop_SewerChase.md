@@ -5,6 +5,17 @@
 
 ---
 
+把剩下的第三关下水道做个简单敌人直线追逐触碰死亡系统+主要机制或者说关卡解法是面向敌人并且站着不动才能把敌人消灭然后在玩家附近开启传送门；
+
+**game instance这一块都连上，完善game loop**
+1.初始出生点是公寓的卧室（带柜门的房间）完成第一关柜门fashion show关卡之后才能打开卧室门出去到客厅（在此之前为上锁）
+2.第二关是客厅大门mushroom hell（现在关卡名还是test_mechanics），完成这个关卡从传送门回到公寓level的客厅区域，此时解锁厕所的门
+3.厕所依旧通过camera交互打开隐藏的传送门进第三关Sewer Chase
+4.完成第三关后进结算关卡结束游戏
+
+
+---
+
 ## 一、总体流程图
 
 ```
@@ -18,7 +29,7 @@
        │   → SpawnAreaTag = "Bedroom_Exit"
        │   → Open Level → Lvl_01_Apartment
        ↓
-[公寓 — 卧室门(BP_DoorLock)解锁 → 客厅]
+[公寓 — 卧室门(BP_LevelPortal bShowDoor=true)解锁 → 客厅]
        │
   (客厅大门 BP_LevelPortal)
        ↓
@@ -28,7 +39,7 @@
        │   → SpawnAreaTag = "LivingRoom_Exit"
        │   → Open Level → Lvl_01_Apartment
        ↓
-[公寓 — 厕所门(BP_DoorLock)解锁]
+[公寓 — 厕所门(BP_LevelPortal bShowDoor=true)解锁]
        │
   (厕所镜子相机交互 → BP_LevelPortal 激活)
        ↓
@@ -44,13 +55,13 @@
 
 ---
 
-## 步骤 1 — BP_GameInstance01 新增 SpawnAreaTag 变量
+## 步骤 1 — BP_GameInstanceMain 新增 SpawnAreaTag 变量
 
 **目标**：在公寓关卡 BeginPlay 时知道把玩家传送到哪个出生点。
 
 ### 操作步骤
 
-1. 双击打开 `Content/_Circus07/Blueprints/GameInstance/BP_GameInstance01`
+1. 双击打开 `Content/_Circus07/Blueprints/GameInstance/BP_GameInstanceMain`
 2. 在左侧 **Variables（变量）** 面板点击 **+** 新增变量：
 
 | 字段 | 值 |
@@ -67,117 +78,110 @@
 
 ---
 
-## 步骤 2 — 新建 BP_DoorLock 蓝图
+## 步骤 2 — 扩展 BP_LevelPortal（新增可选门网格 + 门控逻辑）
 
-**目标**：一个可复用的带锁门，BeginPlay 检查 GameInstance 判断是否解锁，玩家走近可以尝试开门。
+**目标**：在已有的 `BP_LevelPortal` 上新增可选门组件和通关检查逻辑，一个蓝图同时承担"传送门"和"带锁门"两种用途，旧的 Portal 实例行为不受影响。
 
-### 2.1 新建蓝图
+### 2.1 新增组件
 
-1. 在 `Content/_Circus07/Blueprints/` 右键 → **Blueprint Class**
-2. 父类选 **Actor** → 命名 `BP_DoorLock`
-3. 双击打开
+双击打开 `Content/_Circus07/Blueprints/BP_LevelPortal`，在 **Components** 面板新增：
 
-### 2.2 添加组件
-
-在 **Components** 面板依次添加：
-
-| 组件 | 类型 | 说明 |
-|---|---|---|
-| `DoorRoot` | Scene Component | 根节点，控制门轴位置 |
-| `DoorMesh` | Static Mesh Component | 挂在 DoorRoot 下，门的外形 |
-| `InteractBox` | Box Collision | 挂在根节点下（不跟门一起转），玩家靠近检测范围 |
-
-> **注意**：`DoorMesh` 挂在 `DoorRoot` 下，开门动画旋转 `DoorRoot` 即可，`DoorMesh` 跟着转。  
-> `InteractBox` 挂在默认 Root（不是 DoorRoot）下，这样它不会随门旋转，始终在门口位置不动。
+| 组件 | 类型 | 父节点 | 说明 |
+|---|---|---|---|
+| `DoorRoot` | Scene Component | DefaultSceneRoot | 门轴节点，旋转中心 |
+| `DoorMesh` | Static Mesh Component | DoorRoot | 门的外形网格 |
 
 组件层级示意：
 ```
 DefaultSceneRoot
-  ├── DoorRoot (Scene)
-  │     └── DoorMesh (Static Mesh)
-  └── InteractBox (Box Collision)
+  ├── TriggerBox（已有）
+  ├── DoorRoot（新增，Scene）
+  │     └── DoorMesh（新增，Static Mesh）
 ```
 
-### 2.3 添加变量
+### 2.2 新增变量
 
 | Variable Name | Type | Instance Editable | Default | 说明 |
 |---|---|---|---|---|
-| `RequiredLevelName` | String | ✅ | `""` | 需要通关的关卡名，在关卡里对每个实例单独填 |
-| `bUnlocked` | Boolean | ❌ | false | 运行时状态，不需要在编辑器设置 |
-| `ClosedRotation` | Rotator | ✅ | (0, 0, 0) | 门关闭时的 Rotation，在关卡里对齐好后填 |
-| `OpenRotation` | Rotator | ✅ | (0, 90, 0) | 门打开后的 Rotation（Y轴即Yaw旋转90°） |
-| `OpenSpeed` | Float | ✅ | 2.0 | 门打开动画速度 |
+| `bShowDoor` | Boolean | ✅ | false | 是否显示门网格；false 时 BeginPlay 自动隐藏 DoorMesh |
+| `RequiredLevelName` | String | ✅ | `""` | 需要通关的关卡名；空字符串=不检查，bIsActive 保持原值 |
+| `ClosedRotation` | Rotator | ✅ | (0, 0, 0) | 门关闭时的旋转角度 |
+| `OpenRotation` | Rotator | ✅ | (0, 90, 0) | 门打开后的旋转角度（Yaw 旋转90°） |
 | `DoorTimeline` | Timeline | ❌ | — | 控制开门动画（下面创建） |
 
-### 2.4 创建 Timeline 动画
+### 2.3 创建 DoorTimeline
 
-1. 在 Event Graph 空白处右键 → 搜索 **Add Timeline** → 命名 `DoorTimeline`
-2. 双击 `DoorTimeline` 节点进入 Timeline 编辑器：
-   - 点击左上角 **+Float Track** → 命名 `Alpha`
-   - 在轨道上 **右键 → Add key**：
-     - Key 1：Time=0，Value=0
-     - Key 2：Time=1，Value=1
-   - 选中两个 Key，右键 → **Auto**（平滑插值）
-   - **Length** 改为 `1.0`（1秒开门）
+1. Event Graph 空白处右键 → **Add Timeline** → 命名 `DoorTimeline`
+2. 双击进入编辑器：
+   - **+Float Track** → 命名 `Alpha`
+   - 右键轨道 → Add key：Key 1 (Time=0, Value=0)，Key 2 (Time=1, Value=1)
+   - 选中两个 Key → 右键 → **Auto**（平滑插值）
+   - **Length** 改为 `1.0`
 3. 关闭 Timeline 编辑器
 
-### 2.5 BeginPlay 逻辑
+### 2.4 修改 BeginPlay（在原有逻辑末尾追加）
 
-在 Event Graph 连接以下节点：
-
-```
-[Event BeginPlay]
-       │
-       ▼
-[Get Game Instance]
-       │ Return Value
-       ▼
-[Cast To BP_GameInstance01]
-       │ As BP_GameInstance01
-       ▼
-[Is Level Complete]  ← 输入：RequiredLevelName (Get变量)
-       │
-   ┌───┴───┐
-  True   False
-   │       │
-   ▼       ▼
-[Set bUnlocked = true]   [Set bUnlocked = false]
-```
-
-> Cast 失败分支（Cast Failed pin）可以忽略或接一个 Print String 调试用。
-
-### 2.6 InteractBox Overlap 逻辑
-
-选中 `InteractBox` 组件 → 在 Details 面板底部 Events 区域点击 **OnComponentBeginOverlap** 旁的 **+** 按钮，自动在 Event Graph 生成节点。
-
-连接逻辑：
+不删除原有节点，在末尾接上以下逻辑：
 
 ```
-[OnComponentBeginOverlap (InteractBox)]
-       │ OtherActor
-       ▼
-[Cast To BP_FirstPersonCharacter]
-       │ Cast成功
-       ▼
-[Branch] ← Condition: Get bUnlocked
+─── 原 BeginPlay 逻辑末尾 ───
+
+[Branch]  Condition: Get bShowDoor
    │
-   ├── True ──▶ [Is Valid? Get bDoorAlreadyOpen（可选防重复）]
-   │                 │ False
-   │                 ▼
-   │            [Set bDoorAlreadyOpen = true]
-   │                 │
-   │                 ▼
-   │            [Play (DoorTimeline)]  ← 从头播放开门
+   ├── False → [Set Actor Hidden In Game]  目标: DoorMesh，Hidden = true
    │
-   └── False ─▶ [Play Sound At Location]  ← 锁门音效（可选）
-                      │
-                      ▼
-                [Print String "此门未开锁"]  ← 调试用，后期换UI提示
+   └── True  → （DoorMesh 正常显示，不操作）
+
+[Branch]  Condition: RequiredLevelName == ""
+   │
+   ├── True（空字符串）→ 跳过，bIsActive 保持原值不变
+   │
+   └── False（填了关卡名）→
+         [Get Game Instance]
+                │
+                ▼
+         [Cast To BP_GameInstanceMain]
+                │ As BP_GameInstanceMain
+                ▼
+         [Is Level Complete]  ← 输入：Get RequiredLevelName
+                │ Return Value (Bool)
+                ▼
+         [Set bIsActive]
 ```
 
-### 2.7 Timeline Update 驱动门旋转
+> **向下兼容**：`bShowDoor=false` 且 `RequiredLevelName=""` 时，两个 Branch 均走跳过分支，旧 Portal 实例行为与改动前完全一致。
 
-`DoorTimeline` 节点有三个输出引脚：`Update`、`Finished`、`Alpha`（Float Track）
+### 2.5 修改 Overlap 逻辑（在 bIsActive 判断之后插入开门动画）
+
+找到已有 Overlap 逻辑中 `bIsActive = true` 之后、`Open Level` 之前，插入：
+
+```
+─── 已有：bIsActive = true 之后 ───
+
+[Branch]  Condition: Get bShowDoor
+   │
+   ├── False → 直接进入原 Open Level 流程（不变）
+   │
+   └── True  →
+         [Branch]  Condition: Get bDoorAlreadyOpen（可选防重复）
+                │ False
+                ▼
+         [Set bDoorAlreadyOpen = true]
+                │
+                ▼
+         [Play (DoorTimeline)]
+
+         [DoorTimeline] Finished 引脚
+                │
+                ▼
+         进入原 Open Level 流程
+```
+
+> `bDoorAlreadyOpen` 是新增的 Boolean 变量（Instance Editable=false，默认 false），防止玩家反复进出触发区域重复播动画。
+
+### 2.6 DoorTimeline Update 驱动门旋转
+
+在 Event Graph 连接 DoorTimeline 的 Update 引脚：
 
 ```
 [DoorTimeline] Update 引脚
@@ -189,12 +193,12 @@ DefaultSceneRoot
   └── Alpha: DoorTimeline.Alpha
        │ Return Value
        ▼
-[Set World Rotation]  ← 目标选择 DoorRoot 组件（不是整个 Actor）
+[Set World Rotation]  ← 目标：DoorRoot 组件
 ```
 
-> `Set World Rotation` 节点：在节点左上角的目标引脚里，把 `DoorRoot` 组件拖进去，或者先 `Get DoorRoot` 再接过来。
+> `Set World Rotation` 目标引脚：把 `DoorRoot` 组件从 Components 面板拖进去，或先 `Get DoorRoot` 再连线。
 
-### 2.8 Compile & Save，然后关闭
+### 2.7 Compile & Save，然后关闭
 
 ---
 
@@ -235,8 +239,8 @@ DefaultSceneRoot
 [Get Game Instance]
        │
        ▼
-[Cast To BP_GameInstance01]
-       │ As BP_GameInstance01 (保存为局部变量 GI)
+[Cast To BP_GameInstanceMain]
+       │ As BP_GameInstanceMain (保存为局部变量 GI)
        │
        ▼
 [Get SpawnAreaTag]  ← 从 GI 读取
@@ -295,22 +299,26 @@ DefaultSceneRoot
 
 ---
 
-## 步骤 4 — 公寓放置 BP_DoorLock 实例
+## 步骤 4 — 公寓放置 BP_LevelPortal 实例（卧室门 / 厕所门）
 
 ### 4.1 卧室门
 
-1. 把 `BP_DoorLock` 从 Content Browser 拖入公寓关卡，放在卧室门口
-2. 精确调整位置让 `DoorMesh` 和实际门洞对齐
-3. 在 Details 面板设置：
+1. 从 Content Browser 拖入 `BP_LevelPortal`，放在卧室门口，调整位置让 TriggerBox 覆盖门洞
+2. 在 Details 面板配置：
+   - `TargetLevelName` = `Lvl_01_Apartment`（回到公寓自身，BeginPlay 会根据 SpawnAreaTag 决定落点）
+   - `bIsActive` = false（初始关闭，BeginPlay 根据 RequiredLevelName 自动设置）
+   - `bShowDoor` = true
    - `RequiredLevelName` = `Lvl_02_FashionShow`
-   - `ClosedRotation` = 当前门关闭时的 Rotation（点 Actor → 看 Transform Rotation，填入）
+   - `ClosedRotation` = 当前门关闭时的 Rotation（选中 Actor → Details → Transform Rotation，填入）
    - `OpenRotation` = 门打开后的角度（通常 Yaw ±90°，取决于门轴方向）
-4. 如果场景里原来有一个静态门模型，选中它 → 在 Details 里把 Mesh 复制下来 → 粘贴到 `BP_DoorLock` 的 `DoorMesh`，然后删掉原来的静态模型
+3. 场景里原有的静态门模型：把 Mesh 复制到 BP_LevelPortal 的 `DoorMesh` 槽，再删掉原静态模型
 
 ### 4.2 厕所门
 
-重复上面流程，在厕所门口放第二个 `BP_DoorLock` 实例：
+重复上面流程，在厕所门口放第二个 `BP_LevelPortal` 实例：
+- `bShowDoor` = true
 - `RequiredLevelName` = `Lvl_Test_Mechanism`
+- `TargetLevelName` = `Lvl_01_Apartment`
 - `ClosedRotation` / `OpenRotation` 同上
 
 ---
@@ -425,8 +433,8 @@ DefaultSceneRoot
 [Get Game Instance]
        │
        ▼
-[Cast To BP_GameInstance01]
-       │ As BP_GameInstance01
+[Cast To BP_GameInstanceMain]
+       │ As BP_GameInstanceMain
        │
        ├──▶ [Mark Level Complete]
        │         Input: Level Name = "Lvl_Test_Mechanism"
@@ -647,8 +655,8 @@ DefaultSceneRoot
 [Get Game Instance]
        │
        ▼
-[Cast To BP_GameInstance01]
-       │ As BP_GameInstance01
+[Cast To BP_GameInstanceMain]
+       │ As BP_GameInstanceMain
        ▼
 [Modify HP]  Input: Amount = -100
 （填-100确保直接扣死，ModifyHP内部有Clamp到0）
@@ -779,7 +787,7 @@ DefaultSceneRoot
        ▼
 [Sequence]
   ├── Then 0:
-  │     [Get Game Instance] → [Cast To BP_GameInstance01]
+  │     [Get Game Instance] → [Cast To BP_GameInstanceMain]
   │       ├──▶ [Mark Level Complete]  Input: "Lvl_04_SewerChase"
   │       └──▶ [Add Score]  Input: 1000（通关奖励分，按需）
   │
@@ -871,7 +879,7 @@ DefaultSceneRoot
 选中 ScoreText → Details → Content → Text 旁边点 **Bind → Create Binding**
 
 ```
-[Get Game Instance] → [Cast To BP_GameInstance01]
+[Get Game Instance] → [Cast To BP_GameInstanceMain]
        │
        ▼
 [Get Total Score]
@@ -888,8 +896,8 @@ DefaultSceneRoot
 [OnClicked (RestartBtn)]
        │
        ▼
-[Get Game Instance] → [Cast To BP_GameInstance01]
-       │ As BP_GameInstance01 (保存为 GI)
+[Get Game Instance] → [Cast To BP_GameInstanceMain]
+       │ As BP_GameInstanceMain (保存为 GI)
        │
        ▼
 [Sequence]
@@ -944,7 +952,7 @@ DefaultSceneRoot
 打开 `BP_FashionShowGM`，找 `OnLevelComplete` 事件，确认在 Open Level 之前加上：
 
 ```
-[Get Game Instance] → [Cast To BP_GameInstance01]
+[Get Game Instance] → [Cast To BP_GameInstanceMain]
        ├──▶ [Mark Level Complete]  "Lvl_02_FashionShow"
        └──▶ [Set SpawnAreaTag = "Bedroom_Exit"]
 
